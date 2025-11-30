@@ -43,6 +43,7 @@ import re
 import traceback
 import warnings
 import io
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -62,6 +63,14 @@ IMAGE_TYPES = ['Scalogram', 'Spectrogram', 'Kurtogram']
 
 # Sampling frequency in Hz (set to your dataset fs if known)
 FS = 100.0
+
+# Optional time window (in seconds) to process from each signal. Use None to keep full signal.
+# Examples:
+#   TIME_START_S = 2.0; TIME_END_S = 8.5  -> process from 2.0s (inclusive) to 8.5s (exclusive)
+#   TIME_START_S = None; TIME_END_S = 5.0 -> process from start to 5.0s
+#   TIME_START_S = 10.0; TIME_END_S = None -> process from 10.0s to end
+TIME_START_S = 10
+TIME_END_S = 30
 
 # CWT (Scalogram) params
 CWT_WAVELET = 'morl'
@@ -128,6 +137,45 @@ def preprocess_signal(col):
     return arr / max_abs
 
 
+def normalize_array(arr: np.ndarray) -> np.ndarray:
+    """Normalize a numeric 1D array by zero-meaning and dividing by max abs. Returns empty array unchanged."""
+    if arr is None:
+        return arr
+    if arr.size == 0:
+        return arr
+    arr = arr.astype(float)
+    arr = arr - np.nanmean(arr)
+    max_abs = np.nanmax(np.abs(arr))
+    if not np.isfinite(max_abs) or max_abs == 0:
+        return arr
+    return arr / max_abs
+
+
+def slice_time_window(arr: np.ndarray, fs: float, t_start: Optional[float], t_end: Optional[float]) -> np.ndarray:
+    """
+    Return a slice of arr corresponding to [t_start, t_end) in seconds.
+    - If t_start is None, starts at 0.
+    - If t_end is None, goes to end.
+    - Values out of bounds are clipped to [0, len(arr)].
+    - If t_start >= t_end after clipping, returns empty array.
+    """
+    if arr is None:
+        return arr
+    n = len(arr)
+    if n == 0 or not (fs and fs > 0):
+        # if fs invalid, just return original (cannot convert seconds to samples)
+        return arr
+    # convert to indices
+    start_idx = 0 if t_start is None else int(np.floor(t_start * fs))
+    end_idx = n if t_end is None else int(np.ceil(t_end * fs))
+    # clip
+    start_idx = max(0, min(start_idx, n))
+    end_idx = max(0, min(end_idx, n))
+    if end_idx <= start_idx:
+        return np.array([], dtype=arr.dtype)
+    return arr[start_idx:end_idx]
+
+
 def make_output_path(base_output: Path, subject: str, cls: str, img_type: str):
     """Return output folder path for given subject and class (Daily Living / Fall) and image type."""
     folder = base_output / img_type / subject / cls
@@ -149,12 +197,13 @@ def save_figure_to_path(fig, out_path: Path, dpi=DPI, resize_to=RESIZE_TO):
             warnings.warn(f"Could not resize {out_path}: {e}")
 
 
-def generate_scalogram_image(signal1d, fs, scales, wavelet_name, out_path: Path, title='Scalogram'):
+def generate_scalogram_image(signal1d, fs, scales, wavelet_name, out_path: Path, title='Scalogram', t_offset_s: float = 0.0):
     coeffs, freqs = pywt.cwt(signal1d, scales, wavelet_name, sampling_period=1.0/fs)
     mag = np.abs(coeffs)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    extent = [0, len(signal1d)/fs if fs>0 else len(signal1d), max(scales), min(scales)]
+    duration = (len(signal1d)/fs) if (fs and fs > 0) else len(signal1d)
+    extent = [t_offset_s, t_offset_s + duration, max(scales), min(scales)]
     im = ax.imshow(mag, aspect='auto', extent=extent)
     ax.invert_yaxis()
     ax.set_title(title)
@@ -165,13 +214,14 @@ def generate_scalogram_image(signal1d, fs, scales, wavelet_name, out_path: Path,
     save_figure_to_path(fig, out_path)
 
 
-def generate_spectrogram_image(signal1d, fs, nperseg, noverlap, nfft, out_path: Path, title='Spectrogram'):
+def generate_spectrogram_image(signal1d, fs, nperseg, noverlap, nfft, out_path: Path, title='Spectrogram', t_offset_s: float = 0.0):
     f, t_seg, Sxx = signal.spectrogram(signal1d, fs=fs, window='hann', nperseg=nperseg, noverlap=noverlap, nfft=nfft, scaling='spectrum')
     # convert to dB
     Sxx_db = 10 * np.log10(Sxx + 1e-12)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    im = ax.pcolormesh(t_seg, f, Sxx_db, shading='gouraud')
+    t_axis = t_seg + (t_offset_s if (fs and fs > 0) else 0.0)
+    im = ax.pcolormesh(t_axis, f, Sxx_db, shading='gouraud')
     ax.set_ylabel('Frequency [Hz]')
     ax.set_xlabel('Time [sec]')
     ax.set_title(title)
@@ -180,7 +230,7 @@ def generate_spectrogram_image(signal1d, fs, nperseg, noverlap, nfft, out_path: 
     save_figure_to_path(fig, out_path)
 
 
-def generate_kurtogram_image(signal1d, fs, scales, window_samples, step, out_path: Path, title='Kurtogram'):
+def generate_kurtogram_image(signal1d, fs, scales, window_samples, step, out_path: Path, title='Kurtogram', t_offset_s: float = 0.0):
     # Compute CWT magnitude
     coeffs, freqs = pywt.cwt(signal1d, scales, CWT_WAVELET, sampling_period=1.0/fs)
     mag = np.abs(coeffs)  # shape: (n_scales, n_times)
@@ -210,13 +260,18 @@ def generate_kurtogram_image(signal1d, fs, scales, window_samples, step, out_pat
                 K[si, pi] = k - 3.0
 
     # Build time axis in seconds
-    time_positions = np.array(positions) / fs
+    time_positions = (np.array(positions) / fs) + (t_offset_s if (fs and fs > 0) else 0.0)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     # extent: time start, time end, scale max, scale min
-    extent = [time_positions[0] if time_positions.size>0 else 0,
-              time_positions[-1] if time_positions.size>0 else (n_times/fs if fs>0 else n_times),
-              max(scales), min(scales)]
+    if time_positions.size > 0:
+        t_start = time_positions[0]
+        t_end = time_positions[-1]
+    else:
+        duration = (n_times/fs) if (fs and fs > 0) else n_times
+        t_start = t_offset_s
+        t_end = t_offset_s + duration
+    extent = [t_start, t_end, max(scales), min(scales)]
     im = ax.imshow(K, aspect='auto', extent=extent)
     ax.invert_yaxis()
     ax.set_title(title)
@@ -227,7 +282,7 @@ def generate_kurtogram_image(signal1d, fs, scales, window_samples, step, out_pat
     save_figure_to_path(fig, out_path)
 
 
-def generate_xyz_with_original_image(x_norm, y_norm, z_norm, original_signal, fs, out_path: Path, title='XYZ + Original'):
+def generate_xyz_with_original_image(x_norm, y_norm, z_norm, original_signal, fs, out_path: Path, title='XYZ + Original', t_offset_s: float = 0.0):
     """
     Create a single figure that shows four subplots stacked vertically:
       1) X normalized signal
@@ -244,7 +299,7 @@ def generate_xyz_with_original_image(x_norm, y_norm, z_norm, original_signal, fs
     z = z_norm[:n]
     orig = original_signal[:n]
 
-    t = np.arange(n) / fs if fs and fs > 0 else np.arange(n)
+    t = (np.arange(n) / fs + t_offset_s) if (fs and fs > 0) else np.arange(n)
 
     fig, axes = plt.subplots(4, 1, figsize=(10, 9), sharex=True)
 
@@ -274,10 +329,10 @@ def generate_xyz_with_original_image(x_norm, y_norm, z_norm, original_signal, fs
     save_figure_to_path(fig, out_path)
 
 
-def render_original_signal_image(original_signal, fs, width_px, height_px, title):
+def render_original_signal_image(original_signal, fs, width_px, height_px, title, t_offset_s: float = 0.0):
     """Render the original resultant signal (1D) into a PIL Image of requested pixel size."""
     n = len(original_signal)
-    t = np.arange(n) / fs if fs and fs > 0 else np.arange(n)
+    t = (np.arange(n) / fs + t_offset_s) if (fs and fs > 0) else np.arange(n)
 
     fig, ax = plt.subplots(figsize=(width_px/100.0, height_px/100.0), dpi=100)
     ax.plot(t, original_signal, color='black', linewidth=0.9)
@@ -297,7 +352,7 @@ def render_original_signal_image(original_signal, fs, width_px, height_px, title
     return img
 
 
-def compose_single_type_image(original_signal, fs, base_output: Path, subject: str, cls: str, base: str, img_type: str):
+def compose_single_type_image(original_signal, fs, base_output: Path, subject: str, cls: str, base: str, img_type: str, t_offset_s: float = 0.0):
     """
     Create a 2-row composite image for a single modality (img_type):
       Row 1: Original resultant signal (full width)
@@ -329,7 +384,7 @@ def compose_single_type_image(original_signal, fs, base_output: Path, subject: s
     canvas = Image.new('RGB', (canvas_w, canvas_h), color=(255, 255, 255))
 
     # Original row
-    orig_img = render_original_signal_image(original_signal, fs, canvas_w - 2*pad, original_h, title=f"{base} Original Resultant")
+    orig_img = render_original_signal_image(original_signal, fs, canvas_w - 2*pad, original_h, title=f"{base} Original Resultant", t_offset_s=t_offset_s)
     canvas.paste(orig_img, (pad, pad))
 
     # Row of X/Y/Z
@@ -353,6 +408,8 @@ def compose_single_type_image(original_signal, fs, base_output: Path, subject: s
 def process_single_file(file_path: Path, base_output: Path, fs=FS):
     fname = file_path.name
     base = file_path.stem  # without extension
+    # Time offset for plotting (seconds); reflects actual start time of the selected window
+    t_offset_s = float(TIME_START_S) if (TIME_START_S is not None and fs and fs > 0) else 0.0
 
     # Determine class by filename prefix
     if fname.upper().startswith('D'):
@@ -388,12 +445,15 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
             continue
 
         raw_col = df.iloc[:, i]
-        # Keep a raw numeric copy (drop non-finite), do not normalize
-        raw_arr = pd.to_numeric(raw_col, errors='coerce').values
-        raw_arr = raw_arr[np.isfinite(raw_arr)]
-        sig = preprocess_signal(raw_col)
+        # Keep a raw numeric copy (drop non-finite), then slice by time window
+        raw_arr_full = pd.to_numeric(raw_col, errors='coerce').values
+        raw_arr_full = raw_arr_full[np.isfinite(raw_arr_full)]
+        # Apply time window slicing on the raw signal
+        raw_arr = slice_time_window(raw_arr_full, fs, TIME_START_S, TIME_END_S)
+        # Normalize the sliced segment for processing/visualization
+        sig = normalize_array(raw_arr)
         if sig.size < 8 or raw_arr.size < 8:
-            print(f"[SKIP] {base}_{axis}: insufficient data after preprocessing (len={sig.size})")
+            print(f"[SKIP] {base}_{axis}: insufficient data after time-windowing/normalization (len={sig.size})")
             continue
         norm_signals[axis] = sig
         raw_signals[axis] = raw_arr
@@ -409,7 +469,7 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
         # Generate Scalogram
         try:
             out_path = out_folder_scal / out_name
-            generate_scalogram_image(sig, fs, CWT_SCALES, CWT_WAVELET, out_path, title=f"{base}_{axis} Scalogram")
+            generate_scalogram_image(sig, fs, CWT_SCALES, CWT_WAVELET, out_path, title=f"{base}_{axis} Scalogram", t_offset_s=t_offset_s)
         except Exception as e:
             print(f"[ERROR] Scalogram {base}_{axis}: {e}")
             traceback.print_exc()
@@ -417,7 +477,7 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
         # Generate Spectrogram
         try:
             out_path = out_folder_spec / out_name
-            generate_spectrogram_image(sig, fs, STFT_NPERSEG, STFT_NOOVERLAP, STFT_NFFT, out_path, title=f"{base}_{axis} Spectrogram")
+            generate_spectrogram_image(sig, fs, STFT_NPERSEG, STFT_NOOVERLAP, STFT_NFFT, out_path, title=f"{base}_{axis} Spectrogram", t_offset_s=t_offset_s)
         except Exception as e:
             print(f"[ERROR] Spectrogram {base}_{axis}: {e}")
             traceback.print_exc()
@@ -425,7 +485,7 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
         # Generate Kurtogram
         try:
             out_path = out_folder_kurt / out_name
-            generate_kurtogram_image(sig, fs, CWT_SCALES, KURTOGRAM_WINDOW_SAMPLES, KURTOGRAM_STEP, out_path, title=f"{base}_{axis} Kurtogram")
+            generate_kurtogram_image(sig, fs, CWT_SCALES, KURTOGRAM_WINDOW_SAMPLES, KURTOGRAM_STEP, out_path, title=f"{base}_{axis} Kurtogram", t_offset_s=t_offset_s)
         except Exception as e:
             print(f"[ERROR] Kurtogram {base}_{axis}: {e}")
             traceback.print_exc()
@@ -457,7 +517,8 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
                 original_resultant[:n_min_norm],
                 fs,
                 out_path_unified,
-                title=f"{base} XYZ + Original"
+                title=f"{base} XYZ + Original",
+                t_offset_s=t_offset_s
             )
         except Exception as e:
             print(f"[ERROR] Unified XYZ image {base}: {e}")
@@ -469,7 +530,7 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
             n_use = n_min_norm if 'n_min_norm' in locals() else min(len(norm_signals['X']), len(norm_signals['Y']), len(norm_signals['Z']))
             orig_for_comp = original_resultant[:n_use]
             for img_type in ['Scalogram', 'Spectrogram', 'Kurtogram']:
-                out = compose_single_type_image(orig_for_comp, fs, base_output, subject, cls, base, img_type)
+                out = compose_single_type_image(orig_for_comp, fs, base_output, subject, cls, base, img_type, t_offset_s=t_offset_s)
                 if out is not None:
                     # delete per-axis images for this modality
                     folder = make_output_path(base_output, subject, cls, img_type)
