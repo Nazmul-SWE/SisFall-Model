@@ -56,7 +56,7 @@ from PIL import Image
 
 # ---------------- USER CONFIGURATION ----------------
 # Default base directory (change if you want)
-DEFAULT_BASE_DIR = Path(r"/Users/Fahim/Codes/ML/Model/SisFall-Model-main").resolve()
+DEFAULT_BASE_DIR = Path(r"/Users/Fahim/Codes/ML/Model/SisFall_Model").resolve()
 RAW_DATA_DIR_NAME = 'SisFall_dataset'            # folder containing SA01, SE01 ...
 OUTPUT_ROOT_NAME = 'Generated Images'            # root for all generated image types
 IMAGE_TYPES = ['Scalogram', 'Spectrogram', 'Kurtogram']
@@ -69,8 +69,8 @@ FS = 100.0
 #   TIME_START_S = 2.0; TIME_END_S = 8.5  -> process from 2.0s (inclusive) to 8.5s (exclusive)
 #   TIME_START_S = None; TIME_END_S = 5.0 -> process from start to 5.0s
 #   TIME_START_S = 10.0; TIME_END_S = None -> process from 10.0s to end
-TIME_START_S = 10
-TIME_END_S = 30
+TIME_START_S = 2
+TIME_END_S = None
 
 # CWT (Scalogram) params
 CWT_WAVELET = 'morl'
@@ -92,7 +92,7 @@ RESIZE_TO = None  # e.g., (224,224) to normalize for ML, or None to keep generat
 # Subject folder regex
 SUBJECT_PATTERN = re.compile(r'^(SA|SE)\d{2}$', re.IGNORECASE)
 TXT_SUFFIX = '.txt'
-MIN_COLS_REQUIRED = 3
+MIN_COLS_REQUIRED = 9
 
 # ----------------------------------------------------
 
@@ -120,6 +120,11 @@ def robust_read_file(file_path: Path):
             except Exception as e:
                 raise RuntimeError(f"Failed reading {file_path}: {e}")
 
+    # Clean trailing semicolons that appear at end of lines (e.g., "-203;") so numeric parsing works
+    try:
+        df = df.applymap(lambda x: x[:-1] if isinstance(x, str) and x.endswith(';') else x)
+    except Exception:
+        pass
     # drop fully empty columns that sometimes appear due trailing commas
     df = df.dropna(axis=1, how='all')
     return df
@@ -176,9 +181,9 @@ def slice_time_window(arr: np.ndarray, fs: float, t_start: Optional[float], t_en
     return arr[start_idx:end_idx]
 
 
-def make_output_path(base_output: Path, subject: str, cls: str, img_type: str):
-    """Return output folder path for given subject and class (Daily Living / Fall) and image type."""
-    folder = base_output / img_type / subject / cls
+def make_output_path(base_output: Path, device: str, cls: str, img_type: str, subject: str):
+    """Return output folder path for given device, class and image type using new structure: device/Activity type/img_type/subject."""
+    folder = base_output / device / cls / img_type / subject
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -352,16 +357,16 @@ def render_original_signal_image(original_signal, fs, width_px, height_px, title
     return img
 
 
-def compose_single_type_image(original_signal, fs, base_output: Path, subject: str, cls: str, base: str, img_type: str, t_offset_s: float = 0.0):
+def compose_single_type_image(original_signal, fs, base_output: Path, subject: str, cls: str, device: str, base: str, img_type: str, t_offset_s: float = 0.0):
     """
-    Create a 2-row composite image for a single modality (img_type):
+    Create a 2-row composite image for a single modality (img_type) and device:
       Row 1: Original resultant signal (full width)
       Row 2: X, Y, Z tiles from the given modality
-    Saved into the same modality folder as <base>_All.png
+    Saved into the same modality folder as <base>_<img_type>.png
     Returns the output path if created, else None.
     """
     # Expected per-axis images
-    folder = base_output / img_type / subject / cls
+    folder = make_output_path(base_output, device, cls, img_type, subject)
     paths = {
         'X': folder / f"{base}_X.png",
         'Y': folder / f"{base}_Y.png",
@@ -369,7 +374,7 @@ def compose_single_type_image(original_signal, fs, base_output: Path, subject: s
     }
     if not all(p.exists() for p in paths.values()):
         missing = [ax for ax,p in paths.items() if not p.exists()]
-        print(f"[SKIP] {img_type} composite for {base}: missing axis images: {', '.join(missing)}")
+        print(f"[SKIP] {img_type} composite for {device} {base}: missing axis images: {', '.join(missing)}")
         return None
 
     # Layout
@@ -399,7 +404,7 @@ def compose_single_type_image(original_signal, fs, base_output: Path, subject: s
     out_folder = folder
     out_path = out_folder / f"{base}_{img_type}.png"
     canvas.save(out_path)
-    print(f"[OK] {img_type} composite image: {out_path}")
+    print(f"[OK] {img_type} composite image ({device}): {out_path}")
     return out_path
 
 
@@ -436,112 +441,126 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
         print(f"[SKIP] {file_path} has less than {MIN_COLS_REQUIRED} columns ({df.shape[1]})")
         return
 
-    # Extract X,Y,Z columns (first three)
-    norm_signals = {}
-    raw_signals = {}
-    for i, axis in enumerate(['X', 'Y', 'Z']):
-        if i >= df.shape[1]:
-            print(f"[SKIP] {base}_{axis}: missing column")
+    subject = file_path.parent.name
+
+    # Devices and their column mappings
+    devices = {
+        'Acc1': [0, 1, 2],
+        'Gyro': [3, 4, 5],
+        'Acc2': [6, 7, 8],
+    }
+
+    for device, cols in devices.items():
+        # Check column availability
+        if max(cols) >= df.shape[1]:
+            print(f"[SKIP] {base} {device}: missing required columns")
             continue
 
-        raw_col = df.iloc[:, i]
-        # Keep a raw numeric copy (drop non-finite), then slice by time window
-        raw_arr_full = pd.to_numeric(raw_col, errors='coerce').values
-        raw_arr_full = raw_arr_full[np.isfinite(raw_arr_full)]
-        # Apply time window slicing on the raw signal
-        raw_arr = slice_time_window(raw_arr_full, fs, TIME_START_S, TIME_END_S)
-        # Normalize the sliced segment for processing/visualization
-        sig = normalize_array(raw_arr)
-        if sig.size < 8 or raw_arr.size < 8:
-            print(f"[SKIP] {base}_{axis}: insufficient data after time-windowing/normalization (len={sig.size})")
-            continue
-        norm_signals[axis] = sig
-        raw_signals[axis] = raw_arr
+        norm_signals = {}
+        raw_signals = {}
 
-        # Build output folder and filename
-        subject = file_path.parent.name
-        out_folder_scal = make_output_path(base_output, subject, cls, 'Scalogram')
-        out_folder_spec = make_output_path(base_output, subject, cls, 'Spectrogram')
-        out_folder_kurt = make_output_path(base_output, subject, cls, 'Kurtogram')
+        for i, axis in enumerate(['X', 'Y', 'Z']):
+            col_idx = cols[i]
+            raw_col = df.iloc[:, col_idx]
+            # Keep a raw numeric copy (drop non-finite), then slice by time window
+            raw_arr_full = pd.to_numeric(raw_col, errors='coerce').values
+            # Apply time window slicing based on original length (before dropping NaNs) to keep alignment
+            raw_window = slice_time_window(raw_arr_full, fs, TIME_START_S, TIME_END_S)
+            # Fallback: if the requested time window is outside the available data, use the full signal
+            if raw_window.size == 0 and TIME_START_S is not None:
+                print(f"[WARN] {base}_{device}_{axis}: requested window starts after signal end (n={len(raw_arr_full)}, fs={fs}, start={TIME_START_S}). Using full signal instead.")
+                raw_window = raw_arr_full
+            # Drop non-finite only after slicing
+            raw_arr = raw_window[np.isfinite(raw_window)]
+            # Normalize the sliced, cleaned segment for processing/visualization
+            sig = normalize_array(raw_arr)
+            if sig.size < 8 or raw_arr.size < 8:
+                print(f"[SKIP] {base}_{device}_{axis}: insufficient data after time-windowing/normalization (len={sig.size}, raw_len={raw_arr.size})")
+                continue
+            norm_signals[axis] = sig
+            raw_signals[axis] = raw_arr
 
-        out_name = f"{base}_{axis}.png"
+            # Build output folders and filename
+            out_folder_scal = make_output_path(base_output, device, cls, 'Scalogram', subject)
+            out_folder_spec = make_output_path(base_output, device, cls, 'Spectrogram', subject)
+            out_folder_kurt = make_output_path(base_output, device, cls, 'Kurtogram', subject)
 
-        # Generate Scalogram
-        try:
-            out_path = out_folder_scal / out_name
-            generate_scalogram_image(sig, fs, CWT_SCALES, CWT_WAVELET, out_path, title=f"{base}_{axis} Scalogram", t_offset_s=t_offset_s)
-        except Exception as e:
-            print(f"[ERROR] Scalogram {base}_{axis}: {e}")
-            traceback.print_exc()
+            out_name = f"{base}_{axis}.png"
 
-        # Generate Spectrogram
-        try:
-            out_path = out_folder_spec / out_name
-            generate_spectrogram_image(sig, fs, STFT_NPERSEG, STFT_NOOVERLAP, STFT_NFFT, out_path, title=f"{base}_{axis} Spectrogram", t_offset_s=t_offset_s)
-        except Exception as e:
-            print(f"[ERROR] Spectrogram {base}_{axis}: {e}")
-            traceback.print_exc()
+            # Generate Scalogram
+            try:
+                out_path = out_folder_scal / out_name
+                generate_scalogram_image(sig, fs, CWT_SCALES, CWT_WAVELET, out_path, title=f"{base}_{device}_{axis} Scalogram", t_offset_s=t_offset_s)
+            except Exception as e:
+                print(f"[ERROR] Scalogram {base}_{device}_{axis}: {e}")
+                traceback.print_exc()
 
-        # Generate Kurtogram
-        try:
-            out_path = out_folder_kurt / out_name
-            generate_kurtogram_image(sig, fs, CWT_SCALES, KURTOGRAM_WINDOW_SAMPLES, KURTOGRAM_STEP, out_path, title=f"{base}_{axis} Kurtogram", t_offset_s=t_offset_s)
-        except Exception as e:
-            print(f"[ERROR] Kurtogram {base}_{axis}: {e}")
-            traceback.print_exc()
+            # Generate Spectrogram
+            try:
+                out_path = out_folder_spec / out_name
+                generate_spectrogram_image(sig, fs, STFT_NPERSEG, STFT_NOOVERLAP, STFT_NFFT, out_path, title=f"{base}_{device}_{axis} Spectrogram", t_offset_s=t_offset_s)
+            except Exception as e:
+                print(f"[ERROR] Spectrogram {base}_{device}_{axis}: {e}")
+                traceback.print_exc()
 
-    # After per-axis generation, try to create unified image if all axes are present
-    if all(ax in norm_signals for ax in ['X', 'Y', 'Z']):
-        try:
-            # Align to minimum available length among raw signals for original resultant
-            n_min_raw = min(len(raw_signals['X']), len(raw_signals['Y']), len(raw_signals['Z']))
-            if n_min_raw >= 8:
-                rx = raw_signals['X'][:n_min_raw]
-                ry = raw_signals['Y'][:n_min_raw]
-                rz = raw_signals['Z'][:n_min_raw]
-                original_resultant = np.sqrt(rx*rx + ry*ry + rz*rz)
-            else:
-                original_resultant = norm_signals['X']  # fallback, should not happen due to earlier checks
+            # Generate Kurtogram
+            try:
+                out_path = out_folder_kurt / out_name
+                generate_kurtogram_image(sig, fs, CWT_SCALES, KURTOGRAM_WINDOW_SAMPLES, KURTOGRAM_STEP, out_path, title=f"{base}_{device}_{axis} Kurtogram", t_offset_s=t_offset_s)
+            except Exception as e:
+                print(f"[ERROR] Kurtogram {base}_{device}_{axis}: {e}")
+                traceback.print_exc()
 
-            subject = file_path.parent.name
-            out_folder_unified = make_output_path(base_output, subject, cls, 'Plotting')
-            out_name_unified = f"{base}_XYZ.png"
-            out_path_unified = out_folder_unified / out_name_unified
+        # After per-axis generation, try to create unified image if all axes are present
+        if all(ax in norm_signals for ax in ['X', 'Y', 'Z']):
+            try:
+                # Align to minimum available length among raw signals for original resultant
+                n_min_raw = min(len(raw_signals['X']), len(raw_signals['Y']), len(raw_signals['Z']))
+                if n_min_raw >= 8:
+                    rx = raw_signals['X'][:n_min_raw]
+                    ry = raw_signals['Y'][:n_min_raw]
+                    rz = raw_signals['Z'][:n_min_raw]
+                    original_resultant = np.sqrt(rx*rx + ry*ry + rz*rz)
+                else:
+                    original_resultant = norm_signals['X']  # fallback
 
-            # Align normalized signals too
-            n_min_norm = min(len(norm_signals['X']), len(norm_signals['Y']), len(norm_signals['Z']))
-            generate_xyz_with_original_image(
-                norm_signals['X'][:n_min_norm],
-                norm_signals['Y'][:n_min_norm],
-                norm_signals['Z'][:n_min_norm],
-                original_resultant[:n_min_norm],
-                fs,
-                out_path_unified,
-                title=f"{base} XYZ + Original",
-                t_offset_s=t_offset_s
-            )
-        except Exception as e:
-            print(f"[ERROR] Unified XYZ image {base}: {e}")
-            traceback.print_exc()
+                out_folder_unified = make_output_path(base_output, device, cls, 'Plotting', subject)
+                out_name_unified = f"{base}_XYZ.png"
+                out_path_unified = out_folder_unified / out_name_unified
 
-        # Build per-type composite images and remove per-axis tiles to keep only one image per sample per type
-        try:
-            subject = file_path.parent.name
-            n_use = n_min_norm if 'n_min_norm' in locals() else min(len(norm_signals['X']), len(norm_signals['Y']), len(norm_signals['Z']))
-            orig_for_comp = original_resultant[:n_use]
-            for img_type in ['Scalogram', 'Spectrogram', 'Kurtogram']:
-                out = compose_single_type_image(orig_for_comp, fs, base_output, subject, cls, base, img_type, t_offset_s=t_offset_s)
-                if out is not None:
-                    # delete per-axis images for this modality
-                    folder = make_output_path(base_output, subject, cls, img_type)
-                    for ax in ['X','Y','Z']:
-                        try:
-                            (folder / f"{base}_{ax}.png").unlink()
-                        except FileNotFoundError:
-                            pass
-        except Exception as e:
-            print(f"[ERROR] Per-type composite/cleanup {base}: {e}")
-            traceback.print_exc()
+                # Align normalized signals too
+                n_min_norm = min(len(norm_signals['X']), len(norm_signals['Y']), len(norm_signals['Z']))
+                generate_xyz_with_original_image(
+                    norm_signals['X'][:n_min_norm],
+                    norm_signals['Y'][:n_min_norm],
+                    norm_signals['Z'][:n_min_norm],
+                    original_resultant[:n_min_norm],
+                    fs,
+                    out_path_unified,
+                    title=f"{base} {device} XYZ + Original",
+                    t_offset_s=t_offset_s
+                )
+            except Exception as e:
+                print(f"[ERROR] Unified XYZ image {base} ({device}): {e}")
+                traceback.print_exc()
+
+            # Build per-type composite images and remove per-axis tiles to keep only one image per sample per type
+            try:
+                n_use = n_min_norm if 'n_min_norm' in locals() else min(len(norm_signals['X']), len(norm_signals['Y']), len(norm_signals['Z']))
+                orig_for_comp = original_resultant[:n_use]
+                for img_type in ['Scalogram', 'Spectrogram', 'Kurtogram']:
+                    out = compose_single_type_image(orig_for_comp, fs, base_output, subject, cls, device, base, img_type, t_offset_s=t_offset_s)
+                    if out is not None:
+                        # delete per-axis images for this modality
+                        folder = make_output_path(base_output, device, cls, img_type, subject)
+                        for ax in ['X','Y','Z']:
+                            try:
+                                (folder / f"{base}_{ax}.png").unlink()
+                            except FileNotFoundError:
+                                pass
+            except Exception as e:
+                print(f"[ERROR] Per-type composite/cleanup {base} ({device}): {e}")
+                traceback.print_exc()
 
     print(f"[DONE] {file_path}")
 
