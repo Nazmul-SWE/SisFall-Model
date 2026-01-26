@@ -10,7 +10,7 @@ Install once:
   pip install numpy scipy pandas matplotlib pywt pillow
 
 Usage:
-  - Put this script into your project root: D:\3.2\Thesis\SisFall Model\
+  - Put this script into your project root: D:\ 3.2\Thesis\SisFall Model\
   - Ensure raw data in: D:\3.2\Thesis\SisFall Model\SisFall_dataset\SA01, SA02, ..., SE01 ...
   - Run:
       python generate_all_images.py
@@ -56,7 +56,7 @@ from PIL import Image
 
 # ---------------- USER CONFIGURATION ----------------
 # Default base directory (change if you want)
-DEFAULT_BASE_DIR = Path(r"/Users/Fahim/Codes/ML/Model/SisFall_Model").resolve()
+DEFAULT_BASE_DIR = Path(r"E:\MRI\Thesis").resolve()
 RAW_DATA_DIR_NAME = 'SisFall_dataset'            # folder containing SA01, SE01 ...
 OUTPUT_ROOT_NAME = 'Generated Images'            # root for all generated image types
 IMAGE_TYPES = ['Scalogram', 'Spectrogram', 'Kurtogram']
@@ -82,6 +82,7 @@ GENERATE_COMBINED_IMAGES = False
 # and the end of the signal respectively.
 # Example: TIME_START_S=None, TIME_END_S=None, SPLIT_TIMESTAMPS_S=[5,10,15]
 # will generate segments: 0-5, 5-10, 10-15, 15-end
+# SPLIT_TIMESTAMPS_S: List[float] = []
 SPLIT_TIMESTAMPS_S: List[float] = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
 
 # CWT (Scalogram) params
@@ -133,9 +134,11 @@ def robust_read_file(file_path: Path):
                 raise RuntimeError(f"Failed reading {file_path}: {e}")
 
     # Clean trailing semicolons that appear at end of lines (e.g., "-203;") so numeric parsing works
+    # Clean trailing semicolons and whitespace robustly
     try:
-        df = df.applymap(lambda x: x[:-1] if isinstance(x, str) and x.endswith(';') else x)
-    except Exception:
+        df = df.apply(lambda col: col.map(lambda x: x.replace(';', '').strip() if isinstance(x, str) else x))
+    except Exception as e:
+        print(f"Warning: Semicolon cleaning failed: {e}")
         pass
     # drop fully empty columns that sometimes appear due trailing commas
     df = df.dropna(axis=1, how='all')
@@ -320,27 +323,29 @@ def generate_xyz_with_original_image(x_norm, y_norm, z_norm, original_signal, fs
 
     fig, axes = plt.subplots(4, 1, figsize=(10, 9), sharex=True)
 
-    # 1) X
-    axes[0].plot(t, x, color='tab:blue', linewidth=1.0)
-    axes[0].set_ylabel('X')
-    axes[0].set_title(title)
-    axes[0].grid(True, alpha=0.3)
-
-    # 2) Y
-    axes[1].plot(t, y, color='tab:orange', linewidth=1.0)
-    axes[1].set_ylabel('Y')
-    axes[1].grid(True, alpha=0.3)
-
-    # 3) Z
-    axes[2].plot(t, z, color='tab:green', linewidth=1.0)
-    axes[2].set_ylabel('Z')
-    axes[2].grid(True, alpha=0.3)
-
-    # 4) Original resultant magnitude
+    # 1) Original resultant magnitude
     axes[3].plot(t, orig, color='black', linewidth=1.0)
     axes[3].set_xlabel('Time (s)' if fs and fs > 0 else 'Samples')
     axes[3].set_ylabel('Original')
     axes[3].grid(True, alpha=0.3)
+
+    # 2) X
+    axes[0].plot(t, x, color='tab:blue', linewidth=1.5)
+    axes[0].set_ylabel('X')
+    axes[0].set_title(title)
+    axes[0].grid(True, alpha=0.3)
+
+    # 3) Y
+    axes[1].plot(t, y, color='tab:orange', linewidth=1.5)
+    axes[1].set_ylabel('Y')
+    axes[1].grid(True, alpha=0.3)
+
+    # 4) Z
+    axes[2].plot(t, z, color='tab:green', linewidth=1.5)
+    axes[2].set_ylabel('Z')
+    axes[2].grid(True, alpha=0.3)
+
+
 
     fig.tight_layout()
     save_figure_to_path(fig, out_path)
@@ -526,7 +531,7 @@ def process_single_file(file_path: Path, base_output: Path, fs=FS):
     devices = {
         'Acc1': [0, 1, 2],
         'Gyro': [3, 4, 5],
-        'Acc2': [6, 7, 8],
+        'Acc2': [6, 7, 8]
     }
 
     for device, cols in devices.items():
