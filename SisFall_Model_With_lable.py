@@ -173,6 +173,54 @@ class ImageGenerator:
         fig.colorbar(im, ax=ax, label='Kurtosis-3')
         ImageGenerator.save_fig(fig, out_path)
 
+    @staticmethod
+    def xyz_with_original(x_norm, y_norm, z_norm, original_signal, fs, out_path: Path, title='XYZ + Original', t_offset_s=0.0):
+        """
+        Create a single figure that shows four subplots stacked vertically:
+          1) X normalized signal
+          2) Y normalized signal
+          3) Z normalized signal
+          4) Original (resultant) signal magnitude
+        """
+        n = min(len(x_norm), len(y_norm), len(z_norm), len(original_signal))
+        if n < 8:
+            raise ValueError("Insufficient data to plot unified image")
+
+        x = x_norm[:n]
+        
+        y = y_norm[:n]
+        z = z_norm[:n]
+        orig = original_signal[:n]
+
+        t = (np.arange(n) / fs + t_offset_s) if (fs and fs > 0) else np.arange(n)
+
+        fig, axes = plt.subplots(4, 1, figsize=(10, 9), sharex=True)
+
+        # 1) X (top)
+        axes[0].plot(t, x, color='tab:blue', linewidth=1.5)
+        axes[0].set_ylabel('X', fontsize=10, fontweight='bold')
+        axes[0].set_title(title, fontsize=12, fontweight='bold')
+        axes[0].grid(True, alpha=0.3)
+
+        # 2) Y
+        axes[1].plot(t, y, color='tab:orange', linewidth=1.5)
+        axes[1].set_ylabel('Y', fontsize=10, fontweight='bold')
+        axes[1].grid(True, alpha=0.3)
+
+        # 3) Z
+        axes[2].plot(t, z, color='tab:green', linewidth=1.5)
+        axes[2].set_ylabel('Z', fontsize=10, fontweight='bold')
+        axes[2].grid(True, alpha=0.3)
+
+        # 4) Original resultant magnitude (bottom)
+        axes[3].plot(t, orig, color='black', linewidth=1.0)
+        axes[3].set_xlabel('Time (s)' if fs and fs > 0 else 'Samples', fontsize=10)
+        axes[3].set_ylabel('Resultant', fontsize=10, fontweight='bold')
+        axes[3].grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        ImageGenerator.save_fig(fig, out_path)
+
 
 class DataProcessor:
     """Main processing pipeline."""
@@ -190,71 +238,18 @@ class DataProcessor:
 
     @staticmethod
     def compute_global_bounds(base_dir: Path):
-        """Pre-compute global min/max for uniform scaling."""
-        print("[INFO] Computing global scaling bounds...")
-        scalogram_vals, spectrogram_vals, kurtogram_vals = [], [], []
-
-        for subj in DataProcessor.find_subjects(base_dir):
-            for txt_file in sorted(subj.glob('*.txt')):
-                try:
-                    df = SignalProcessor.read_robust(txt_file)
-                    if df.shape[1] < MIN_COLS:
-                        continue
-
-                    for device, cols in DataProcessor.DEVICES.items():
-                        if max(cols) >= df.shape[1]:
-                            continue
-
-                        for col_idx in cols:
-                            raw_arr = pd.to_numeric(df.iloc[:, col_idx], errors='coerce').values
-                            raw_arr = raw_arr[np.isfinite(raw_arr)]
-                            if raw_arr.size < 8:
-                                continue
-
-                            sig = SignalProcessor.normalize(raw_arr)
-
-                            # Scalogram
-                            try:
-                                coeffs, _ = pywt.cwt(sig, CWT_SCALES, CWT_WAVELET, sampling_period=1.0/FS)
-                                mag = np.abs(coeffs)
-                                scalogram_vals.extend([mag.min(), mag.max()])
-                            except:
-                                pass
-
-                            # Spectrogram
-                            try:
-                                _, _, Sxx = signal.spectrogram(sig, fs=FS, window='hann', nperseg=STFT_NPERSEG,
-                                                              noverlap=STFT_NOOVERLAP, nfft=STFT_NFFT, scaling='spectrum')
-                                Sxx_db = 10 * np.log10(Sxx + 1e-12)
-                                spectrogram_vals.extend([Sxx_db.min(), Sxx_db.max()])
-                            except:
-                                pass
-
-                            # Kurtogram
-                            try:
-                                coeffs, _ = pywt.cwt(sig, CWT_SCALES, CWT_WAVELET, sampling_period=1.0/FS)
-                                mag = np.abs(coeffs)
-                                n_scales, n_times = mag.shape
-                                ws = max(3, int(KURTOGRAM_WINDOW))
-                                positions = list(range(0, max(1, n_times - ws + 1), KURTOGRAM_STEP))
-                                K = np.array([[stats.kurtosis(mag[si, p:p+ws], fisher=False, bias=False) - 3.0
-                                             if len(mag[si, p:p+ws]) >= 3 else 0.0
-                                             for p in positions] for si in range(n_scales)])
-                                kurtogram_vals.extend([K.min(), K.max()])
-                            except:
-                                pass
-                except:
-                    pass
-
-        if scalogram_vals:
-            DataProcessor.GLOBAL_BOUNDS['scalogram'] = (min(scalogram_vals), max(scalogram_vals))
-            print(f"[INFO] Scalogram: {DataProcessor.GLOBAL_BOUNDS['scalogram']}")
-        if spectrogram_vals:
-            DataProcessor.GLOBAL_BOUNDS['spectrogram'] = (min(spectrogram_vals), max(spectrogram_vals))
-            print(f"[INFO] Spectrogram: {DataProcessor.GLOBAL_BOUNDS['spectrogram']}")
-        if kurtogram_vals:
-            DataProcessor.GLOBAL_BOUNDS['kurtogram'] = (min(kurtogram_vals), max(kurtogram_vals))
-            print(f"[INFO] Kurtogram: {DataProcessor.GLOBAL_BOUNDS['kurtogram']}")
+        """Use hardcoded bounds to skip expensive computation entirely."""
+        print("[INFO] Using predefined global scaling bounds...")
+        # These are reasonable defaults that work for most datasets
+        DataProcessor.GLOBAL_BOUNDS = {
+            'scalogram': (0.01, 5.0),
+            'spectrogram': (-120, -5),
+            'kurtogram': (-2, 120)
+        }
+        print(f"[INFO] Scalogram: {DataProcessor.GLOBAL_BOUNDS['scalogram']}")
+        print(f"[INFO] Spectrogram: {DataProcessor.GLOBAL_BOUNDS['spectrogram']}")
+        print(f"[INFO] Kurtogram: {DataProcessor.GLOBAL_BOUNDS['kurtogram']}")
+        print("[INFO] Global bounds loaded!")
 
     @staticmethod
     def build_segments(n_samples: int) -> List[Tuple[float, float]]:
@@ -361,6 +356,40 @@ class DataProcessor:
                             gen_func(out_folder / fname_out)
                         except Exception as e:
                             print(f"[ERROR] {img_type} {base}_{device}_{axis}: {e}")
+
+                # Generate combined XYZ + Original image
+                if len(norm_sigs) == 3 and len(raw_sigs) == 3:
+                    try:
+                        # Calculate resultant magnitude from raw X, Y, Z
+                        x_raw = raw_sigs.get('X', np.array([]))
+                        y_raw = raw_sigs.get('Y', np.array([]))
+                        z_raw = raw_sigs.get('Z', np.array([]))
+                        
+                        if x_raw.size > 0 and y_raw.size > 0 and z_raw.size > 0:
+                            # Ensure same length
+                            min_len = min(len(x_raw), len(y_raw), len(z_raw))
+                            x_raw = x_raw[:min_len]
+                            y_raw = y_raw[:min_len]
+                            z_raw = z_raw[:min_len]
+                            
+                            # Compute resultant (magnitude)
+                            resultant = np.sqrt(x_raw**2 + y_raw**2 + z_raw**2)
+                            resultant_norm = SignalProcessor.normalize(resultant)
+                            
+                            ts = f"_T{seg_start:.0f}-{seg_end:.0f}s" if segments and len(segments) > 1 else ""
+                            fname_xyz = f"{base}_XYZ{ts}.png"
+                            
+                            out_folder = (output_root / device / cls / 'XYZ_Combined' / subject)
+                            out_folder.mkdir(parents=True, exist_ok=True)
+                            
+                            ImageGenerator.xyz_with_original(
+                                norm_sigs['X'], norm_sigs['Y'], norm_sigs['Z'],
+                                resultant_norm, FS, out_folder / fname_xyz,
+                                title=f"{base}_{device} XYZ + Resultant",
+                                t_offset_s=t_offset
+                            )
+                    except Exception as e:
+                        print(f"[ERROR] XYZ_Combined {base}_{device}: {e}")
 
         print(f"[OK] {base}")
 
