@@ -24,7 +24,7 @@ from scipy import signal, stats
 from PIL import Image
 
 # ============ CONFIG ============
-DEFAULT_BASE_DIR = Path(r"D:\4.1\CSE 400-A\SisFall-Model").resolve()
+DEFAULT_BASE_DIR = Path(r"/Users/Fahim/Codes/ML/Model/SisFall-Model").resolve()
 RAW_DATA_DIR = 'SisFall_dataset'
 OUTPUT_DIR = 'Generated Images'
 SUBJECT_PATTERN = re.compile(r'^(SA|SE)\d{2}$', re.IGNORECASE)
@@ -323,12 +323,18 @@ class DataProcessor:
                     col_idx = cols[i]
                     raw_arr = pd.to_numeric(df.iloc[:, col_idx], errors='coerce').values
                     raw_arr = raw_arr[np.isfinite(raw_arr)]
-                    raw_window = SignalProcessor.slice_window(raw_arr, FS, seg_start, seg_end)
 
+                    # Normalize the full signal ONCE before slicing
+                    full_sig_normalized = SignalProcessor.normalize(raw_arr)
+
+                    raw_window = SignalProcessor.slice_window(raw_arr, FS, seg_start, seg_end)
                     if raw_window.size == 0:
                         raw_window = raw_arr
 
-                    sig = SignalProcessor.normalize(raw_window)
+                    sig = SignalProcessor.slice_window(full_sig_normalized, FS, seg_start, seg_end)  # ← slice already-normalized
+                    if sig.size == 0:
+                        sig = full_sig_normalized
+
                     if sig.size < 8:
                         continue
 
